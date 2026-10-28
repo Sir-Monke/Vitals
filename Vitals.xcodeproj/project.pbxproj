@@ -1,0 +1,93 @@
+// !$*UTF8*$!
+{
+	archiveVersion = 1;
+	classes = {
+	};
+	objectVersion = 56;
+	objects = {
+		B20000000000000000000001 /* Vitals.swift in Sources */ = {isa = PBXBuildFile; fileRef = B20000000000000000000002; };
+		B20000000000000000000012 /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = B20000000000000000000013; };
+		B20000000000000000000013 /* Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Assets.xcassets; sourceTree = "<group>"; };
+		B20000000000000000000002 /* Vitals.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Vitals.swift; sourceTree = "<group>"; };
+		B20000000000000000000003 /* Vitals.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = Vitals.app; sourceTree = BUILT_PRODUCTS_DIR; };
+		B20000000000000000000004 /* Frameworks */ = {isa = PBXFrameworksBuildPhase; buildActionMask = 2147483647; files = (); runOnlyForDeploymentPostprocessing = 0; };
+		B20000000000000000000009 /* Resources */ = {isa = PBXResourcesBuildPhase; buildActionMask = 2147483647; files = (B20000000000000000000012, ); runOnlyForDeploymentPostprocessing = 0; };
+		B20000000000000000000008 /* Sources */ = {isa = PBXSourcesBuildPhase; buildActionMask = 2147483647; files = (B20000000000000000000001, ); runOnlyForDeploymentPostprocessing = 0; };
+		B20000000000000000000005 = {isa = PBXGroup; children = (B20000000000000000000002, B20000000000000000000013, B20000000000000000000006, ); sourceTree = "<group>"; };
+		B20000000000000000000006 /* Products */ = {isa = PBXGroup; children = (B20000000000000000000003, ); name = Products; sourceTree = "<group>"; };
+		B20000000000000000000007 /* Vitals */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = B2000000000000000000000A;
+			buildPhases = (B20000000000000000000008, B20000000000000000000004, B20000000000000000000009, );
+			buildRules = ();
+			dependencies = ();
+			name = Vitals;
+			productName = Vitals;
+			productReference = B20000000000000000000003;
+			productType = "com.apple.product-type.application";
+		};
+		B2000000000000000000000C /* Project object */ = {
+			isa = PBXProject;
+			attributes = {BuildIndependentTargetsInParallel = 1; LastSwiftUpdateCheck = 1600; LastUpgradeCheck = 1600; };
+			buildConfigurationList = B2000000000000000000000B;
+			compatibilityVersion = "Xcode 14.0";
+			developmentRegion = en;
+			hasScannedForEncodings = 0;
+			knownRegions = (en, Base, );
+			mainGroup = B20000000000000000000005;
+			productRefGroup = B20000000000000000000006;
+			projectDirPath = "";
+			projectRoot = "";
+			targets = (B20000000000000000000007, );
+		};
+		B2000000000000000000000D /* Debug */ = {isa = XCBuildConfiguration; buildSettings = {
+			ALWAYS_SEARCH_USER_PATHS = NO;
+			MACOSX_DEPLOYMENT_TARGET = 14.0;
+			ONLY_ACTIVE_ARCH = YES;
+			SDKROOT = macosx;
+			SWIFT_ACTIVE_COMPILATION_CONDITIONS = DEBUG;
+			SWIFT_OPTIMIZATION_LEVEL = "-Onone";
+		}; name = Debug; };
+		B2000000000000000000000E /* Release */ = {isa = XCBuildConfiguration; buildSettings = {
+			ALWAYS_SEARCH_USER_PATHS = NO;
+			DEAD_CODE_STRIPPING = YES;
+			MACOSX_DEPLOYMENT_TARGET = 14.0;
+			SDKROOT = macosx;
+			SWIFT_COMPILATION_MODE = wholemodule;
+			SWIFT_OPTIMIZATION_LEVEL = "-O";
+		}; name = Release; };
+		B2000000000000000000000F /* Debug */ = {isa = XCBuildConfiguration; buildSettings = {
+			ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
+			CODE_SIGN_IDENTITY = "-";
+			CODE_SIGN_STYLE = Manual;
+			CURRENT_PROJECT_VERSION = 1;
+			ENABLE_HARDENED_RUNTIME = YES;
+			GENERATE_INFOPLIST_FILE = YES;
+			INFOPLIST_KEY_LSUIElement = YES;
+			INFOPLIST_KEY_LSApplicationCategoryType = "public.app-category.utilities";
+			LD_RUNPATH_SEARCH_PATHS = ("$(inherited)", "@executable_path/../Frameworks", );
+			MARKETING_VERSION = 1.0;
+			PRODUCT_BUNDLE_IDENTIFIER = io.github.sir-monke.vitals;
+			PRODUCT_NAME = "$(TARGET_NAME)";
+			SWIFT_VERSION = 5.0;
+		}; name = Debug; };
+		B20000000000000000000010 /* Release */ = {isa = XCBuildConfiguration; buildSettings = {
+			ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
+			CODE_SIGN_IDENTITY = "-";
+			CODE_SIGN_STYLE = Manual;
+			CURRENT_PROJECT_VERSION = 1;
+			ENABLE_HARDENED_RUNTIME = YES;
+			GENERATE_INFOPLIST_FILE = YES;
+			INFOPLIST_KEY_LSUIElement = YES;
+			INFOPLIST_KEY_LSApplicationCategoryType = "public.app-category.utilities";
+			LD_RUNPATH_SEARCH_PATHS = ("$(inherited)", "@executable_path/../Frameworks", );
+			MARKETING_VERSION = 1.0;
+			PRODUCT_BUNDLE_IDENTIFIER = io.github.sir-monke.vitals;
+			PRODUCT_NAME = "$(TARGET_NAME)";
+			SWIFT_VERSION = 5.0;
+		}; name = Release; };
+		B2000000000000000000000A = {isa = XCConfigurationList; buildConfigurations = (B2000000000000000000000F, B20000000000000000000010, ); defaultConfigurationIsVisible = 0; defaultConfigurationName = Release; };
+		B2000000000000000000000B = {isa = XCConfigurationList; buildConfigurations = (B2000000000000000000000D, B2000000000000000000000E, ); defaultConfigurationIsVisible = 0; defaultConfigurationName = Release; };
+	};
+	rootObject = B2000000000000000000000C;
+}
