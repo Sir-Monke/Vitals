@@ -3,6 +3,7 @@ import Charts
 import Darwin
 import IOKit
 import ServiceManagement
+import CoreServices
 
 // MARK: - App
 
@@ -250,11 +251,7 @@ final class Monitor {
     }
 
     private func readDisk() {
-        let values = try? URL(fileURLWithPath: "/").resourceValues(forKeys: [
-            .volumeAvailableCapacityForImportantUsageKey, .volumeTotalCapacityKey,
-        ])
-        live.diskFree = values?.volumeAvailableCapacityForImportantUsage ?? 0
-        live.diskTotal = Int64(values?.volumeTotalCapacity ?? 0)
+        (live.diskFree, live.diskTotal) = diskCapacity()
     }
 
     private func publish() {
@@ -841,28 +838,71 @@ struct HoverHighlight: ButtonStyle {
 }
 
 // MARK: - Free up space
+// The approach follows ClearDisk and BlitzClean (both MIT): rebuildable caches are deleted outright, your own files
+// go to the Bin, and anything in use or changed in the last hour is left alone.
 
-enum Junk {
-    static let home = FileManager.default.homeDirectoryForCurrentUser
-    static let caches = home.appending(path: "Library/Caches")
-    static let xcode = home.appending(path: "Library/Developer/Xcode/DerivedData")
-    static let downloads = home.appending(path: "Downloads")
+/// A folder of things that rebuild themselves, so clearing it is safe.
+struct CacheFolder: Identifiable {
+    let name: String
+    let symbol: String
+    let folder: URL
+    let about: String   // shown on hover
+    var id: String { name }
+
+    private static let home = FileManager.default.homeDirectoryForCurrentUser
+
+    /// The ones this Mac has.
+    static let all = [
+        CacheFolder(name: "App caches", symbol: "shippingbox", folder: home.appending(path: "Library/Caches"),
+                    about: "Files apps keep to load faster. They rebuild what they need."),
+        CacheFolder(name: "Xcode build files", symbol: "hammer",
+                    folder: home.appending(path: "Library/Developer/Xcode/DerivedData"),
+                    about: "Build products and indexes. Xcode rebuilds them on the next build."),
+        CacheFolder(name: "Xcode device support", symbol: "iphone",
+                    folder: home.appending(path: "Library/Developer/Xcode/iOS DeviceSupport"),
+                    about: "Symbols for iPhones you've connected. Xcode downloads them again when one connects."),
+        CacheFolder(name: "npm cache", symbol: "cube.box", folder: home.appending(path: ".npm/_cacache"),
+                    about: "Packages npm has downloaded. It downloads them again when needed."),
+    ].filter { FileManager.default.fileExists(atPath: $0.folder.path) }
 }
 
-/// Bytes on disk taken by `url` and everything in it. Skips what macOS won't let Vitals read.
+enum Places {
+    static let downloads = FileManager.default.homeDirectoryForCurrentUser.appending(path: "Downloads")
+    static let bin = FileManager.default.homeDirectoryForCurrentUser.appending(path: ".Trash")
+}
+
+/// Free and total space on the startup disk. Free includes space macOS can purge, as Finder shows it.
+func diskCapacity() -> (free: Int64, total: Int64) {
+    let values = try? URL(fileURLWithPath: "/").resourceValues(forKeys: [
+        .volumeAvailableCapacityForImportantUsageKey, .volumeTotalCapacityKey,
+    ])
+    return (values?.volumeAvailableCapacityForImportantUsage ?? 0, Int64(values?.volumeTotalCapacity ?? 0))
+}
+
+/// Bytes on disk taken by `url` and everything in it. A hard-linked file counts once across its links (npm, pnpm
+/// and Cargo stores are full of them). Skips what macOS won't let Vitals read.
 func allocatedSize(_ url: URL) -> Int64 {
-    let key = URLResourceKey.totalFileAllocatedSizeKey
-    func size(_ file: URL) -> Int64 { Int64((try? file.resourceValues(forKeys: [key]))?.totalFileAllocatedSize ?? 0) }
+    let keys: Set<URLResourceKey> = [.totalFileAllocatedSizeKey, .linkCountKey]
+    func size(_ file: URL) -> Int64 {
+        let values = try? file.resourceValues(forKeys: keys)
+        return Int64(values?.totalFileAllocatedSize ?? 0) / Int64(max(values?.linkCount ?? 1, 1))
+    }
     var total = size(url)
-    let files = FileManager.default.enumerator(at: url, includingPropertiesForKeys: [key], errorHandler: { _, _ in true })
+    let files = FileManager.default.enumerator(at: url, includingPropertiesForKeys: Array(keys), errorHandler: { _, _ in true })
     while let file = files?.nextObject() as? URL { total += size(file) }
     return total
 }
 
-/// Deletes everything inside `folder` but keeps the folder. Skips what macOS won't let Vitals delete.
-func clearContents(of folder: URL) {
+/// Deletes what's inside `folder` but keeps the folder. Leaves anything changed since `cutoff` (an hour ago unless
+/// told otherwise: the project you're building, the app you're using) and anything named in `keeping`, such as
+/// the caches of running apps. Skips what macOS won't let Vitals delete.
+func clearContents(of folder: URL, changedBefore cutoff: Date = .now.addingTimeInterval(-3600), keeping: Set<String> = []) {
     let fm = FileManager.default
-    for item in (try? fm.contentsOfDirectory(at: folder, includingPropertiesForKeys: nil)) ?? [] {
+    for item in (try? fm.contentsOfDirectory(at: folder, includingPropertiesForKeys: [.contentModificationDateKey])) ?? [] {
+        // ponytail: a folder's date moves only when its own entries change. BlitzClean also asks lsof which files
+        // are open; add that if a cleared cache ever upsets a running app.
+        let changed = (try? item.resourceValues(forKeys: [.contentModificationDateKey]))?.contentModificationDate
+        guard let changed, changed < cutoff, !keeping.contains(item.lastPathComponent) else { continue }
         try? fm.removeItem(at: item)
     }
 }
@@ -873,21 +913,35 @@ struct Download: Identifiable {
     var id: URL { url }
 }
 
-/// What landed in Downloads over 30 days ago, biggest first. Throws if macOS hasn't allowed access.
+/// What in Downloads you haven't added, changed or opened for 30 days, biggest first. Leaves half-finished
+/// downloads alone. Throws if macOS hasn't allowed access to Downloads.
 func oldDownloads() throws -> [Download] {
     let cutoff = Date.now.addingTimeInterval(-30 * 86_400)
-    let keys: Set<URLResourceKey> = [.addedToDirectoryDateKey, .creationDateKey]
+    let keys: Set<URLResourceKey> = [.addedToDirectoryDateKey, .contentModificationDateKey]
+    let unfinished: Set<String> = ["crdownload", "download", "part"]
     return try FileManager.default
-        .contentsOfDirectory(at: Junk.downloads, includingPropertiesForKeys: Array(keys), options: .skipsHiddenFiles)
+        .contentsOfDirectory(at: Places.downloads, includingPropertiesForKeys: Array(keys), options: .skipsHiddenFiles)
         .compactMap { url in
+            guard !unfinished.contains(url.pathExtension.lowercased()) else { return nil }
             let values = try? url.resourceValues(forKeys: keys)
-            guard let added = values?.addedToDirectoryDate ?? values?.creationDate, added < cutoff else { return nil }
+            let dates = [values?.addedToDirectoryDate, values?.contentModificationDate, lastOpened(url)].compactMap { $0 }
+            guard let latest = dates.max(), latest < cutoff else { return nil }
             return Download(url: url, size: allocatedSize(url))
         }
         .sorted { $0.size > $1.size }
 }
 
-/// Asks Finder to empty the Bin (Vitals can't see inside it itself). macOS asks once whether that's OK.
+/// When it was last opened, as Spotlight records it.
+func lastOpened(_ url: URL) -> Date? {
+    MDItemCreateWithURL(nil, url as CFURL).flatMap { MDItemCopyAttribute($0, kMDItemLastUsedDate) as? Date }
+}
+
+/// The Bin's size, or nil when macOS keeps Vitals out (looking inside needs Full Disk Access).
+func binSize() -> Int64? {
+    (try? FileManager.default.contentsOfDirectory(atPath: Places.bin.path)) == nil ? nil : allocatedSize(Places.bin)
+}
+
+/// Asks Finder to empty the Bin, which works without Full Disk Access. macOS asks once whether that's OK.
 func emptyBin() -> Bool {
     let script = Process()
     script.executableURL = URL(fileURLWithPath: "/usr/bin/osascript")
@@ -897,22 +951,25 @@ func emptyBin() -> Bool {
     return script.terminationStatus == 0
 }
 
-/// Opened from the Disk ring: what's safe to clear and how much each frees, plus old downloads to pick from.
+/// Opened from the Disk ring: how much is safe to clear, each cache on its own, old downloads to pick from, the Bin.
 struct FreeUpSpace: View {
     let monitor: Monitor
     let back: () -> Void
 
-    @State private var caches: Int64?           // nil while measuring
-    @State private var xcode: Int64?
+    @State private var sizes: [String: Int64] = [:]   // by cache name; missing while measuring
+    @State private var freed: Int64 = 0
     @State private var downloads: [Download]?
     @State private var downloadsBlocked = false
     @State private var picked: Set<URL> = []
-    @State private var working: String?         // the row whose clear-up is running
+    @State private var binBytes: Int64?
+    @State private var binChecked = false
+    @State private var binNote: String?
     @State private var confirmBin = false
-    @State private var binNote = "Erases what's in it for good"
-    private var hasXcode: Bool { FileManager.default.fileExists(atPath: Junk.xcode.path) }
+    @State private var working: String?               // the button whose work is running
 
     var body: some View {
+        let measuring = sizes.count < CacheFolder.all.count
+        let total = sizes.values.reduce(0, +)
         VStack(alignment: .leading, spacing: 16) {
             HStack {
                 Button(action: back) {
@@ -924,45 +981,72 @@ struct FreeUpSpace: View {
                     .font(.system(size: 11)).foregroundStyle(.secondary)
             }
 
-            VStack(alignment: .leading, spacing: 14) {
-                CleanRow(title: "App caches", symbol: "shippingbox", detail: caches.map(Format.bytes)) {
-                    action("caches", "Clear", work: { clearContents(of: Junk.caches) },
-                           then: { caches = await measure(Junk.caches) })
+            HStack(alignment: .center) {
+                VStack(alignment: .leading, spacing: 1) {
+                    Text(measuring ? "Measuring…" : Format.bytes(total))
+                        .font(.system(size: 22, weight: .semibold).monospacedDigit())
+                        .contentTransition(.numericText())
+                    Text(freed > 0 ? "Freed \(Format.bytes(freed))" : "safe to clear")
+                        .font(.system(size: 11)).foregroundStyle(freed > 0 ? accent : .secondary)
                 }
-                if hasXcode {
-                    CleanRow(title: "Xcode build files", symbol: "hammer", detail: xcode.map(Format.bytes)) {
-                        action("xcode", "Clear", work: { clearContents(of: Junk.xcode) },
-                               then: { xcode = await measure(Junk.xcode) })
+                Spacer()
+                button("Clear all", id: "all") { await clear(CacheFolder.all, id: "all") }
+                    .buttonStyle(.borderedProminent)
+                    .tint(accent)
+                    .disabled(measuring || total == 0)
+            }
+            .animation(.smooth, value: total)
+
+            VStack(alignment: .leading, spacing: 12) {
+                ForEach(CacheFolder.all) { cache in
+                    CleanRow(title: cache.name, symbol: cache.symbol, detail: sizes[cache.name].map(Format.bytes)) {
+                        button("Clear", id: cache.name) { await clear([cache], id: cache.name) }
                     }
+                    .help(cache.about)
                 }
+            }
+
+            Rectangle().fill(.primary.opacity(0.08)).frame(height: 1)
+
+            VStack(alignment: .leading, spacing: 12) {
                 CleanRow(title: "Old downloads", symbol: "arrow.down.circle", detail: downloadsDetail) {
-                    action("downloads", "Move to Bin",
-                           work: { [picked] in picked.forEach { try? FileManager.default.trashItem(at: $0, resultingItemURL: nil) } },
-                           then: {
-                               picked = []
-                               binNote = "Empty it to free that space"
-                               await loadDownloads()
-                           })
+                    button("Move to Bin", id: "downloads") { await binDownloads() }
                         .disabled(picked.isEmpty)
                 }
+                .help("Things you haven't opened or changed for 30 days. They go to the Bin, so you can still get them back.")
                 if let downloads, !downloads.isEmpty { downloadList(downloads) }
-                CleanRow(title: "Bin", symbol: "trash", detail: confirmBin ? "This can't be undone" : binNote) { binButton }
+                CleanRow(title: "Bin", symbol: "trash", detail: binDetail) { binButton }
             }
-            .controlSize(.small)
+
+            Text("Leaves anything in use or changed in the last hour.")
+                .font(.system(size: 10)).foregroundStyle(.tertiary)
         }
-        .task { caches = await measure(Junk.caches) }
-        .task { if hasXcode { xcode = await measure(Junk.xcode) } }
+        .controlSize(.small)
+        .task {
+            await withTaskGroup(of: (String, Int64).self) { group in
+                for cache in CacheFolder.all { group.addTask { (cache.name, allocatedSize(cache.folder)) } }
+                for await (name, size) in group { sizes[name] = size }
+            }
+        }
         .task { await loadDownloads() }
+        .task { await measureBin() }
     }
 
     private var downloadsDetail: String? {
         guard let downloads else { return nil }
         if downloadsBlocked { return "Allow Downloads in System Settings › Privacy & Security › Files & Folders" }
-        if downloads.isEmpty { return "Nothing over 30 days old" }
+        if downloads.isEmpty { return "Nothing unused for 30 days" }
         let chosen = downloads.filter { picked.contains($0.url) }
         return chosen.isEmpty
-            ? "\(downloads.count) over 30 days old · \(Format.bytes(downloads.map(\.size).reduce(0, +)))"
+            ? "\(downloads.count) unused for 30 days · \(Format.bytes(downloads.map(\.size).reduce(0, +)))"
             : "\(chosen.count) chosen · \(Format.bytes(chosen.map(\.size).reduce(0, +)))"
+    }
+
+    private var binDetail: String? {
+        if confirmBin { return "This can't be undone" }
+        if let binNote { return binNote }
+        guard binChecked else { return nil }
+        return binBytes.map(Format.bytes) ?? "Erases what's in it for good"
     }
 
     private func downloadList(_ items: [Download]) -> some View {
@@ -990,48 +1074,33 @@ struct FreeUpSpace: View {
 
     /// Erasing is permanent, so the first click only arms it: the button turns red for a few seconds.
     @ViewBuilder private var binButton: some View {
-        if working == "bin" {
-            ProgressView().controlSize(.small)
-        } else if confirmBin {
+        if confirmBin {
             Button("Erase") {
                 confirmBin = false
-                Task {
-                    let emptied = await run("bin") { emptyBin() }
-                    binNote = emptied ? "Emptied" : "Allow Vitals to control Finder in System Settings › Privacy & Security › Automation"
-                }
+                Task { await emptyTheBin() }
             }
             .buttonStyle(.borderedProminent)
             .tint(.red)
         } else {
-            Button("Empty") {
+            button("Empty", id: "bin") {
                 confirmBin = true
-                Task {
-                    try? await Task.sleep(for: .seconds(4))
-                    confirmBin = false
-                }
+                try? await Task.sleep(for: .seconds(4))
+                confirmBin = false
             }
-            .disabled(working != nil)
+            .disabled(binBytes == 0)
         }
     }
 
-    /// A row's button. Its work runs off the main thread with a spinner in the button's place.
-    private func action(_ id: String, _ title: String, work: @escaping @Sendable () -> Void,
-                        then: @escaping @MainActor () async -> Void) -> some View {
-        Group {
-            if working == id {
-                ProgressView().controlSize(.small)
-            } else {
-                Button(title) {
-                    Task {
-                        await run(id, work)
-                        await then()
-                    }
-                }
-                .disabled(working != nil)
-            }
+    /// A button that turns into a spinner while its work runs, and waits while another button's work runs.
+    @ViewBuilder private func button(_ title: String, id: String, _ action: @escaping () async -> Void) -> some View {
+        if working == id {
+            ProgressView().controlSize(.small)
+        } else {
+            Button(title) { Task { await action() } }.disabled(working != nil)
         }
     }
 
+    /// Runs `work` off the main thread, marking `id` as busy, then shows the new free space.
     private func run<T: Sendable>(_ id: String, _ work: @escaping @Sendable () -> T) async -> T {
         working = id
         let result = await Task.detached(priority: .userInitiated) { work() }.value
@@ -1040,8 +1109,46 @@ struct FreeUpSpace: View {
         return result
     }
 
-    private func measure(_ folder: URL) async -> Int64 {
-        await Task.detached(priority: .utility) { allocatedSize(folder) }.value
+    /// Clears the caches, then measures what's left: "freed" is what really went, not the size before.
+    private func clear(_ caches: [CacheFolder], id: String) async {
+        let running = Set(NSWorkspace.shared.runningApplications.compactMap(\.bundleIdentifier))   // their caches stay
+        let left = await run(id) {
+            caches.map { cache -> Int64 in
+                clearContents(of: cache.folder, keeping: running)
+                return allocatedSize(cache.folder)
+            }
+        }
+        for (cache, size) in zip(caches, left) {
+            freed += max((sizes[cache.name] ?? 0) - size, 0)
+            sizes[cache.name] = size
+        }
+    }
+
+    private func binDownloads() async {
+        await run("downloads") { [picked] in
+            picked.forEach { try? FileManager.default.trashItem(at: $0, resultingItemURL: nil) }
+        }
+        picked = []
+        binNote = nil
+        await loadDownloads()   // anything that didn't move shows up again
+        await measureBin()
+    }
+
+    /// Finder empties the Bin, so the space freed is measured from the disk's free space before and after.
+    private func emptyTheBin() async {
+        let before = diskCapacity().free
+        let emptied = await run("bin") { emptyBin() }
+        try? await Task.sleep(for: .seconds(2))   // free space settles a moment after the files go
+        let gained = diskCapacity().free - before
+        binNote = !emptied ? "Allow Vitals to control Finder in System Settings › Privacy & Security › Automation"
+            : gained >= 100_000_000 ? "Freed \(Format.bytes(gained))" : "Emptied"
+        monitor.refreshDisk()
+        await measureBin()
+    }
+
+    private func measureBin() async {
+        binBytes = await Task.detached(priority: .utility) { binSize() }.value
+        binChecked = true
     }
 
     private func loadDownloads() async {
@@ -1142,8 +1249,14 @@ func selfTest() -> Never {
     try? FileManager.default.createDirectory(at: scratch.appending(path: "inner"), withIntermediateDirectories: true)
     FileManager.default.createFile(atPath: scratch.appending(path: "inner/file").path,
                                    contents: Data((0..<20_000).map { UInt8($0 % 251) }))
-    precondition(allocatedSize(scratch) >= 20_000, "folder sizes count what's inside")
+    let size = allocatedSize(scratch)
+    precondition(size >= 20_000, "folder sizes count what's inside")
+    try? FileManager.default.linkItem(at: scratch.appending(path: "inner/file"), to: scratch.appending(path: "inner/link"))
+    precondition(abs(allocatedSize(scratch) - size) < 4096, "a hard-linked file counts once")
     clearContents(of: scratch)
+    precondition(FileManager.default.fileExists(atPath: scratch.appending(path: "inner").path),
+                 "clearing leaves anything changed in the last hour")
+    clearContents(of: scratch, changedBefore: .now.addingTimeInterval(60))
     precondition(FileManager.default.fileExists(atPath: scratch.path)
                  && (try? FileManager.default.contentsOfDirectory(atPath: scratch.path))?.isEmpty == true,
                  "clearing empties a folder but keeps it")
