@@ -1,11 +1,14 @@
-# Builds and self-tests every push. A v* tag also signs, notarises and publishes a release,
-# when the signing secrets are set (see README); without them the release is unsigned.
+# Builds and self-tests every push. A v* tag, or a release published on GitHub, also attaches the zip to
+# that release. It's signed and notarised when the MACOS_CERT_P12, MACOS_CERT_PASSWORD, APPLE_TEAM_ID,
+# APPLE_ID and APPLE_APP_PASSWORD secrets are set; without them the app is unsigned.
 name: Build
 
 on:
   push:
     branches: [main]
     tags: ["v*"]
+  release:
+    types: [published]
   pull_request:
 
 jobs:
@@ -74,4 +77,7 @@ jobs:
         if: startsWith(github.ref, 'refs/tags/v')
         env:
           GH_TOKEN: ${{ github.token }}
-        run: gh release create "$GITHUB_REF_NAME" Vitals.zip --title "Vitals ${GITHUB_REF_NAME#v}" --generate-notes
+        # Upload to the release if it was made on GitHub, otherwise make it.
+        run: |
+          gh release upload "$GITHUB_REF_NAME" Vitals.zip --clobber ||
+            gh release create "$GITHUB_REF_NAME" Vitals.zip --title "Vitals ${GITHUB_REF_NAME#v}" --generate-notes
