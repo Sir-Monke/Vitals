@@ -1004,11 +1004,6 @@ struct FreeUpSpace: View {
                     }
                     .help(cache.about)
                 }
-            }
-
-            Rectangle().fill(.primary.opacity(0.08)).frame(height: 1)
-
-            VStack(alignment: .leading, spacing: 12) {
                 CleanRow(title: "Old downloads", symbol: "arrow.down.circle", detail: downloadsDetail) {
                     button("Move to Bin", id: "downloads") { await binDownloads() }
                         .disabled(picked.isEmpty)
