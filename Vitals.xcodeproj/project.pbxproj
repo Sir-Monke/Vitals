@@ -69,7 +69,7 @@
 			INFOPLIST_KEY_NSAppleEventsUsageDescription = "Vitals asks Finder to empty the Bin when you choose Erase.";
 			INFOPLIST_KEY_NSDownloadsFolderUsageDescription = "Vitals lists downloads over 30 days old so you can choose which to move to the Bin.";
 			LD_RUNPATH_SEARCH_PATHS = ("$(inherited)", "@executable_path/../Frameworks", );
-			MARKETING_VERSION = 1.1.1;
+			MARKETING_VERSION = 1.2.0;
 			PRODUCT_BUNDLE_IDENTIFIER = io.github.sir-monke.vitals;
 			PRODUCT_NAME = "$(TARGET_NAME)";
 			SWIFT_VERSION = 5.0;
@@ -87,7 +87,7 @@
 			INFOPLIST_KEY_NSAppleEventsUsageDescription = "Vitals asks Finder to empty the Bin when you choose Erase.";
 			INFOPLIST_KEY_NSDownloadsFolderUsageDescription = "Vitals lists downloads over 30 days old so you can choose which to move to the Bin.";
 			LD_RUNPATH_SEARCH_PATHS = ("$(inherited)", "@executable_path/../Frameworks", );
-			MARKETING_VERSION = 1.1.1;
+			MARKETING_VERSION = 1.2.0;
 			PRODUCT_BUNDLE_IDENTIFIER = io.github.sir-monke.vitals;
 			PRODUCT_NAME = "$(TARGET_NAME)";
 			SWIFT_VERSION = 5.0;
