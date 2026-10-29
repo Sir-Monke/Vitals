@@ -21,7 +21,7 @@
 
 - **Lives in your menu bar.** CPU, memory, how full your disk is, and live download and upload speeds, in one row.
 - **Opens to more.** Rings for CPU, memory, disk and GPU, a two-minute network graph, plus battery, uptime and temperature. Hover over a ring or the battery for detail.
-- **Frees up space.** Click the Disk ring to clear app caches, Xcode build files and device support, and the npm cache in one go, leaving anything in use or changed in the last hour. Pick downloads you haven't opened for 30 days to move to the Bin, and empty the Bin.
+- **Frees up space.** Click the Disk ring to clear app caches, Xcode build files and device support, and the npm cache in one go, leaving the caches of open apps and anything changed in the last 5 minutes. Pick downloads you haven't opened for 30 days to move to the Bin, and empty the Bin.
 - **Made to stay on.** Checks every 2 seconds, lets macOS group its wake-ups to save power, and only redraws the panel while it's open.
 - **Private.** Reads your Mac's own counters. Nothing leaves your Mac.
 

@@ -893,18 +893,37 @@ func allocatedSize(_ url: URL) -> Int64 {
     return total
 }
 
-/// Deletes what's inside `folder` but keeps the folder. Leaves anything changed since `cutoff` (an hour ago unless
-/// told otherwise: the project you're building, the app you're using) and anything named in `keeping`, such as
-/// the caches of running apps. Skips what macOS won't let Vitals delete.
-func clearContents(of folder: URL, changedBefore cutoff: Date = .now.addingTimeInterval(-3600), keeping: Set<String> = []) {
-    let fm = FileManager.default
-    for item in (try? fm.contentsOfDirectory(at: folder, includingPropertiesForKeys: [.contentModificationDateKey])) ?? [] {
+/// What clearing a folder would remove, and what stays because it's in use.
+struct ClearPlan: Sendable {
+    var items: [URL] = []
+    var size: Int64 = 0   // what clearing frees
+    var kept: Int64 = 0   // in use: an open app's cache, or being written right now
+}
+
+/// Splits what's inside `folder` into what's safe to delete and what's in use: anything named in `keeping` (the
+/// caches of open apps) or changed since `cutoff`. Measuring and clearing both use this, so the size shown is what
+/// Clear removes.
+func clearPlan(_ folder: URL, keeping: Set<String> = [], changedBefore cutoff: Date = .now.addingTimeInterval(-300)) -> ClearPlan {
+    var plan = ClearPlan()
+    let key = URLResourceKey.contentModificationDateKey
+    for item in (try? FileManager.default.contentsOfDirectory(at: folder, includingPropertiesForKeys: [key])) ?? [] {
         // ponytail: a folder's date moves only when its own entries change. BlitzClean also asks lsof which files
         // are open; add that if a cleared cache ever upsets a running app.
-        let changed = (try? item.resourceValues(forKeys: [.contentModificationDateKey]))?.contentModificationDate
-        guard let changed, changed < cutoff, !keeping.contains(item.lastPathComponent) else { continue }
-        try? fm.removeItem(at: item)
+        let changed = (try? item.resourceValues(forKeys: [key]))?.contentModificationDate ?? .distantFuture
+        let size = allocatedSize(item)
+        if changed < cutoff && !keeping.contains(item.lastPathComponent) {
+            plan.items.append(item)
+            plan.size += size
+        } else {
+            plan.kept += size
+        }
     }
+    return plan
+}
+
+/// Deletes what the plan found safe to delete. Returns the names macOS wouldn't let go, so they count as in use.
+func removePlanned(_ plan: ClearPlan) -> Set<String> {
+    Set(plan.items.filter { (try? FileManager.default.removeItem(at: $0)) == nil }.map(\.lastPathComponent))
 }
 
 struct Download: Identifiable {
@@ -956,7 +975,8 @@ struct FreeUpSpace: View {
     let monitor: Monitor
     let back: () -> Void
 
-    @State private var sizes: [String: Int64] = [:]   // by cache name; missing while measuring
+    @State private var plans: [String: ClearPlan] = [:]   // by cache name; missing while measuring
+    @State private var stuck: Set<String> = []            // what macOS wouldn't let Vitals delete
     @State private var freed: Int64 = 0
     @State private var downloads: [Download]?
     @State private var downloadsBlocked = false
@@ -968,8 +988,8 @@ struct FreeUpSpace: View {
     @State private var working: String?               // the button whose work is running
 
     var body: some View {
-        let measuring = sizes.count < CacheFolder.all.count
-        let total = sizes.values.reduce(0, +)
+        let measuring = plans.count < CacheFolder.all.count
+        let total = plans.values.map(\.size).reduce(0, +)
         VStack(alignment: .leading, spacing: 16) {
             HStack {
                 Button(action: back) {
@@ -990,7 +1010,7 @@ struct FreeUpSpace: View {
                         .font(.system(size: 11)).foregroundStyle(freed > 0 ? accent : .secondary)
                 }
                 Spacer()
-                button("Clear all", id: "all") { await clear(CacheFolder.all, id: "all") }
+                button("Clear all", id: "all") { await clear(CacheFolder.all.filter { plans[$0.name]?.size ?? 0 > 0 }, id: "all") }
                     .buttonStyle(.borderedProminent)
                     .tint(accent)
                     .disabled(measuring || total == 0)
@@ -999,8 +1019,9 @@ struct FreeUpSpace: View {
 
             VStack(alignment: .leading, spacing: 12) {
                 ForEach(CacheFolder.all) { cache in
-                    CleanRow(title: cache.name, symbol: cache.symbol, detail: sizes[cache.name].map(Format.bytes)) {
+                    CleanRow(title: cache.name, symbol: cache.symbol, detail: detail(plans[cache.name])) {
                         button("Clear", id: cache.name) { await clear([cache], id: cache.name) }
+                            .disabled(plans[cache.name]?.size ?? 0 == 0)
                     }
                     .help(cache.about)
                 }
@@ -1013,14 +1034,15 @@ struct FreeUpSpace: View {
                 CleanRow(title: "Bin", symbol: "trash", detail: binDetail) { binButton }
             }
 
-            Text("Leaves anything in use or changed in the last hour.")
+            Text("Leaves the caches of open apps, and anything changed in the last 5 minutes.")
                 .font(.system(size: 10)).foregroundStyle(.tertiary)
         }
         .controlSize(.small)
         .task {
-            await withTaskGroup(of: (String, Int64).self) { group in
-                for cache in CacheFolder.all { group.addTask { (cache.name, allocatedSize(cache.folder)) } }
-                for await (name, size) in group { sizes[name] = size }
+            let keep = inUse
+            await withTaskGroup(of: (String, ClearPlan).self) { group in
+                for cache in CacheFolder.all { group.addTask { (cache.name, clearPlan(cache.folder, keeping: keep)) } }
+                for await (name, plan) in group { plans[name] = plan }
             }
         }
         .task { await loadDownloads() }
@@ -1104,18 +1126,33 @@ struct FreeUpSpace: View {
         return result
     }
 
-    /// Clears the caches, then measures what's left: "freed" is what really went, not the size before.
+    /// Names that stay: the caches of open apps, and whatever macOS wouldn't let Vitals delete before.
+    private var inUse: Set<String> { Set(NSWorkspace.shared.runningApplications.compactMap(\.bundleIdentifier)).union(stuck) }
+
+    /// "12 MB", or "12 MB · 140 MB in use" when some of it has to stay.
+    private func detail(_ plan: ClearPlan?) -> String? {
+        guard let plan else { return nil }
+        guard plan.kept >= 1_000_000 else { return Format.bytes(plan.size) }
+        let kept = "\(Format.bytes(plan.kept)) in use"
+        return plan.size == 0 ? kept : "\(Format.bytes(plan.size)) · \(kept)"
+    }
+
+    /// Plans afresh (things may have changed since measuring), clears, then measures again: "freed" is what
+    /// really went, and anything macOS refused counts as in use from then on.
     private func clear(_ caches: [CacheFolder], id: String) async {
-        let running = Set(NSWorkspace.shared.runningApplications.compactMap(\.bundleIdentifier))   // their caches stay
-        let left = await run(id) {
-            caches.map { cache -> Int64 in
-                clearContents(of: cache.folder, keeping: running)
-                return allocatedSize(cache.folder)
+        let keep = inUse
+        let outcomes = await run(id) {
+            caches.map { cache -> (plan: ClearPlan, refused: Set<String>, freed: Int64) in
+                let before = clearPlan(cache.folder, keeping: keep)
+                let refused = removePlanned(before)
+                let after = clearPlan(cache.folder, keeping: keep.union(refused))
+                return (after, refused, max(before.size + before.kept - after.size - after.kept, 0))
             }
         }
-        for (cache, size) in zip(caches, left) {
-            freed += max((sizes[cache.name] ?? 0) - size, 0)
-            sizes[cache.name] = size
+        for (cache, outcome) in zip(caches, outcomes) {
+            plans[cache.name] = outcome.plan
+            stuck.formUnion(outcome.refused)
+            freed += outcome.freed
         }
     }
 
@@ -1248,10 +1285,13 @@ func selfTest() -> Never {
     precondition(size >= 20_000, "folder sizes count what's inside")
     try? FileManager.default.linkItem(at: scratch.appending(path: "inner/file"), to: scratch.appending(path: "inner/link"))
     precondition(abs(allocatedSize(scratch) - size) < 4096, "a hard-linked file counts once")
-    clearContents(of: scratch)
-    precondition(FileManager.default.fileExists(atPath: scratch.appending(path: "inner").path),
-                 "clearing leaves anything changed in the last hour")
-    clearContents(of: scratch, changedBefore: .now.addingTimeInterval(60))
+    let fresh = clearPlan(scratch)
+    precondition(fresh.items.isEmpty && fresh.kept >= 20_000, "anything changed in the last 5 minutes stays")
+    let later = Date.now.addingTimeInterval(60)
+    precondition(clearPlan(scratch, keeping: ["inner"], changedBefore: later).items.isEmpty, "open apps' caches stay")
+    let plan = clearPlan(scratch, changedBefore: later)
+    precondition(plan.size >= 20_000 && plan.kept == 0, "the size shown is what Clear removes")
+    precondition(removePlanned(plan).isEmpty, "clearing deletes what was planned")
     precondition(FileManager.default.fileExists(atPath: scratch.path)
                  && (try? FileManager.default.contentsOfDirectory(atPath: scratch.path))?.isEmpty == true,
                  "clearing empties a folder but keeps it")
