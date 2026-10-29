@@ -590,7 +590,8 @@ enum MenuBarLabel {
 
 // MARK: - Panel
 
-let accent = Color(red: 0.839, green: 0.580, blue: 0.239)   // #D6943D
+let accent = Color(red: 0.839, green: 0.580, blue: 0.239)   // #D6943D, also download
+let uploadColour = Color(red: 0.420, green: 0.620, blue: 0.859)   // #6B9EDB: tells apart from amber, colour-blind too
 private let gibibyte = 1_073_741_824.0   // memory is counted in binary units, like Activity Monitor
 
 struct PanelView: View {
@@ -724,15 +725,15 @@ struct Ring: View {
     }
 }
 
-/// Download and upload, with a two-minute graph: solid for download, faint for upload.
+/// Download and upload, with a two-minute graph: amber for download, blue for upload.
 struct NetworkRow: View {
     let stats: Stats
 
     var body: some View {
         HStack(spacing: 16) {
             VStack(alignment: .leading, spacing: 5) {
-                rate("arrow.down", stats.netDown)
-                rate("arrow.up", stats.netUp)
+                rate("arrow.down", stats.netDown, accent)
+                rate("arrow.up", stats.netUp, uploadColour)
             }
             .frame(width: 92, alignment: .leading)
 
@@ -752,7 +753,7 @@ struct NetworkRow: View {
                 ForEach(Array(stats.upHistory.enumerated()), id: \.offset) { point in
                     LineMark(x: .value("Time", x(point.offset, stats.upHistory)), y: .value("Rate", point.element),
                              series: .value("Direction", "Up"))
-                        .foregroundStyle(accent.opacity(0.45))
+                        .foregroundStyle(uploadColour)
                         .lineStyle(StrokeStyle(lineWidth: 1.5, lineCap: .round, lineJoin: .round))
                         .interpolationMethod(.catmullRom)
                 }
@@ -769,9 +770,9 @@ struct NetworkRow: View {
     /// Newest point on the right edge, so a fresh graph fills in from the right.
     private func x(_ index: Int, _ history: [Double]) -> Int { index + Monitor.historyLength - history.count }
 
-    private func rate(_ symbol: String, _ value: Double) -> some View {
+    private func rate(_ symbol: String, _ value: Double, _ colour: Color) -> some View {
         HStack(spacing: 5) {
-            Image(systemName: symbol).font(.system(size: 10, weight: .semibold)).foregroundStyle(.secondary)
+            Image(systemName: symbol).font(.system(size: 10, weight: .bold)).foregroundStyle(colour)
             Text(Format.rate(value)).font(.system(size: 12, weight: .medium).monospacedDigit())
         }
     }
