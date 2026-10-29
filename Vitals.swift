@@ -635,7 +635,7 @@ struct PanelView: View {
                 )
                 Button { freeingSpace = true } label: {
                     Ring(value: s.diskUsed, title: "Disk", symbol: "internaldrive",
-                         detail: "\(Format.size(Double(s.diskFree) / 1e9)) free")
+                         detail: "\(Format.size(Double(s.diskFree) / 1e9)) free", opensPage: true)
                 }
                 .buttonStyle(HoverHighlight())
                 .help("Free up space")
@@ -681,6 +681,7 @@ struct Ring: View {
     let title: String
     let symbol: String
     let detail: String
+    var opensPage = false   // shows the detail as a tinted pill with a chevron, so the ring reads as a button
 
     var body: some View {
         let clamped = min(max(value, 0), 1)
@@ -703,7 +704,19 @@ struct Ring: View {
                     Image(systemName: symbol).font(.system(size: 10, weight: .medium))
                     Text(title).font(.system(size: 11, weight: .medium))
                 }
-                Text(detail).font(.system(size: 10)).foregroundStyle(.secondary)
+                if opensPage {
+                    HStack(spacing: 3) {
+                        Text(detail)
+                        Image(systemName: "chevron.right").font(.system(size: 7, weight: .bold)).foregroundStyle(accent)
+                    }
+                    .font(.system(size: 10, weight: .medium))
+                    .padding(.horizontal, 7)
+                    .padding(.vertical, 2)
+                    .background(accent.opacity(0.18), in: Capsule())
+                    .fixedSize()   // a little wider than its column is fine; truncating isn't
+                } else {
+                    Text(detail).font(.system(size: 10)).foregroundStyle(.secondary)
+                }
             }
             .lineLimit(1)
         }
@@ -938,7 +951,7 @@ struct FreeUpSpace: View {
         if downloads.isEmpty { return "Nothing over 30 days old" }
         let chosen = downloads.filter { picked.contains($0.url) }
         return chosen.isEmpty
-            ? "\(downloads.count) over 30 days old. Tick the ones to bin."
+            ? "\(downloads.count) over 30 days old · \(Format.bytes(downloads.map(\.size).reduce(0, +)))"
             : "\(chosen.count) chosen · \(Format.bytes(chosen.map(\.size).reduce(0, +)))"
     }
 
