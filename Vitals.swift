@@ -13,6 +13,7 @@ let docsFolder: URL? = CommandLine.arguments.firstIndex(of: "--render-docs").fla
 
 @main
 struct VitalsApp: App {
+    @NSApplicationDelegateAdaptor(AppDelegate.self) private var appDelegate
     @State private var monitor = Monitor()
 
     init() {
@@ -43,6 +44,47 @@ struct VitalsApp: App {
     }
 }
 
+final class AppDelegate: NSObject, NSApplicationDelegate {
+    func applicationDidFinishLaunching(_ notification: Notification) {
+        // Just installed: open the panel so it's obvious where Vitals went.
+        if CommandLine.arguments.contains("--show") {
+            Task { @MainActor in
+                try? await Task.sleep(for: .seconds(1))
+                showPanel()
+            }
+        }
+    }
+
+    /// Opening Vitals while it's running (Finder, Spotlight, Launchpad) shows its panel instead of doing nothing.
+    func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows: Bool) -> Bool {
+        showPanel()
+        return false
+    }
+}
+
+/// Clicks Vitals' own menu bar item. If macOS has hidden it because the menu bar is full, says so instead.
+@MainActor func showPanel() {
+    let button = NSApp.windows
+        .filter { $0.className == "NSStatusBarWindow" && $0.occlusionState.contains(.visible) }
+        .lazy.compactMap { statusButton(in: $0.contentView) }.first
+    if let button {
+        button.performClick(nil)
+        return
+    }
+    NSApp.activate()
+    let alert = NSAlert()
+    alert.messageText = "Vitals is running, but your menu bar is full"
+    alert.informativeText = "Make room by holding ⌘ and dragging other icons out of the menu bar, "
+        + "or turn some off in System Settings › Menu Bar."
+    alert.runModal()
+}
+
+private func statusButton(in view: NSView?) -> NSStatusBarButton? {
+    guard let view else { return nil }
+    if let button = view as? NSStatusBarButton { return button }
+    return view.subviews.lazy.compactMap { statusButton(in: $0) }.first
+}
+
 /// Run from Xcode (or a download), the app copies itself into Applications, starts that copy and quits,
 /// so it never needs Xcode again. If the copy fails it just keeps running from where it is.
 func installAndRelaunch() {
@@ -68,7 +110,7 @@ func installAndRelaunch() {
     }
     let open = Process()
     open.executableURL = URL(fileURLWithPath: "/usr/bin/open")
-    open.arguments = [target.path]
+    open.arguments = [target.path, "--args", "--show"]
     try? open.run()
     open.waitUntilExit()
     exit(0)
@@ -192,19 +234,30 @@ final class Monitor {
         push(live.netUp, to: &live.upHistory)
 
         // The capacity lookup works out purgeable space, so once a minute is plenty.
-        if tick % 30 == 0 {
-            let values = try? URL(fileURLWithPath: "/").resourceValues(forKeys: [
-                .volumeAvailableCapacityForImportantUsageKey, .volumeTotalCapacityKey,
-            ])
-            live.diskFree = values?.volumeAvailableCapacityForImportantUsage ?? 0
-            live.diskTotal = Int64(values?.volumeTotalCapacity ?? 0)
-        }
+        if tick % 30 == 0 { readDisk() }
         tick += 1
 
         live.battery = battery()
         live.uptime = now
         live.thermal = ProcessInfo.processInfo.thermalState
+        publish()
+    }
 
+    /// After clearing space: shows the new free space now, not at the next once-a-minute check.
+    func refreshDisk() {
+        readDisk()
+        publish()
+    }
+
+    private func readDisk() {
+        let values = try? URL(fileURLWithPath: "/").resourceValues(forKeys: [
+            .volumeAvailableCapacityForImportantUsageKey, .volumeTotalCapacityKey,
+        ])
+        live.diskFree = values?.volumeAvailableCapacityForImportantUsage ?? 0
+        live.diskTotal = Int64(values?.volumeTotalCapacity ?? 0)
+    }
+
+    private func publish() {
         let c = Int(live.cpu.rounded())
         let r = Int((Double(live.ramUsed) / Double(ramTotal) * 100).rounded())
         let d = Int((live.diskUsed * 100).rounded())
@@ -414,6 +467,9 @@ enum Format {
         }
     }
 
+    /// "2.1 GB", "180 MB": the same units Finder uses.
+    static func bytes(_ count: Int64) -> String { ByteCountFormatter.string(fromByteCount: count, countStyle: .file) }
+
     static func power(_ battery: Battery) -> String {
         battery.charging ? "Charging" : battery.pluggedIn ? "Plugged in" : "On battery"
     }
@@ -539,10 +595,31 @@ private let gibibyte = 1_073_741_824.0   // memory is counted in binary units, l
 
 struct PanelView: View {
     let monitor: Monitor
+    @State private var freeingSpace = false
 
     var body: some View {
+        Group {
+            if freeingSpace {
+                FreeUpSpace(monitor: monitor) { freeingSpace = false }
+            } else {
+                overview
+            }
+        }
+        .padding(18)
+        .frame(width: 320)
+        .onAppear { monitor.panelOpen = true }
+        .onReceive(NotificationCenter.default.publisher(for: NSWindow.didBecomeKeyNotification)) { _ in
+            monitor.panelOpen = true
+        }
+        .onReceive(NotificationCenter.default.publisher(for: NSWindow.didResignKeyNotification)) { _ in
+            monitor.panelOpen = false
+            freeingSpace = false   // reopening starts on the overview, with fresh numbers
+        }
+    }
+
+    private var overview: some View {
         let s = monitor.panel
-        VStack(alignment: .leading, spacing: 18) {
+        return VStack(alignment: .leading, spacing: 18) {
             VStack(alignment: .leading, spacing: 2) {
                 Text(monitor.model ?? "Mac").font(.system(size: 13, weight: .semibold))
                 Text("\(monitor.chip) · \(monitor.os)").font(.system(size: 11)).foregroundStyle(.secondary)
@@ -556,8 +633,12 @@ struct PanelView: View {
                     value: Double(s.ramUsed) / Double(monitor.ramTotal), title: "Memory", symbol: "memorychip",
                     detail: "\(Format.number(Double(s.ramUsed) / gibibyte)) / \(Format.size(Double(monitor.ramTotal) / gibibyte))"
                 )
-                Ring(value: s.diskUsed, title: "Disk", symbol: "internaldrive",
-                     detail: "\(Format.size(Double(s.diskFree) / 1e9)) free")
+                Button { freeingSpace = true } label: {
+                    Ring(value: s.diskUsed, title: "Disk", symbol: "internaldrive",
+                         detail: "\(Format.size(Double(s.diskFree) / 1e9)) free")
+                }
+                .buttonStyle(HoverHighlight())
+                .help("Free up space")
                 Ring(value: s.gpu / 100, title: "GPU", symbol: "cube.transparent",
                      detail: monitor.gpuCores > 0 ? "\(monitor.gpuCores) cores" : "Graphics")
             }
@@ -580,15 +661,6 @@ struct PanelView: View {
             }
             .padding(.top, 12)
             .overlay(alignment: .top) { Rectangle().fill(.primary.opacity(0.08)).frame(height: 1) }
-        }
-        .padding(18)
-        .frame(width: 320)
-        .onAppear { monitor.panelOpen = true }
-        .onReceive(NotificationCenter.default.publisher(for: NSWindow.didBecomeKeyNotification)) { _ in
-            monitor.panelOpen = true
-        }
-        .onReceive(NotificationCenter.default.publisher(for: NSWindow.didResignKeyNotification)) { _ in
-            monitor.panelOpen = false
         }
     }
 
@@ -724,6 +796,266 @@ struct MoreMenu: View {
     }
 }
 
+/// Faint highlight on hover, so the Disk ring reads as something you can click.
+struct HoverHighlight: ButtonStyle {
+    func makeBody(configuration: Configuration) -> some View { Highlighted(configuration: configuration) }
+
+    private struct Highlighted: View {
+        let configuration: ButtonStyleConfiguration
+        @State private var hovering = false
+
+        var body: some View {
+            configuration.label
+                .contentShape(Rectangle())
+                .background(
+                    RoundedRectangle(cornerRadius: 10)
+                        .fill(.primary.opacity(configuration.isPressed ? 0.1 : hovering ? 0.05 : 0))
+                        .padding(-5)
+                )
+                .onHover { hovering = $0 }
+        }
+    }
+}
+
+// MARK: - Free up space
+
+enum Junk {
+    static let home = FileManager.default.homeDirectoryForCurrentUser
+    static let caches = home.appending(path: "Library/Caches")
+    static let xcode = home.appending(path: "Library/Developer/Xcode/DerivedData")
+    static let downloads = home.appending(path: "Downloads")
+}
+
+/// Bytes on disk taken by `url` and everything in it. Skips what macOS won't let Vitals read.
+func allocatedSize(_ url: URL) -> Int64 {
+    let key = URLResourceKey.totalFileAllocatedSizeKey
+    func size(_ file: URL) -> Int64 { Int64((try? file.resourceValues(forKeys: [key]))?.totalFileAllocatedSize ?? 0) }
+    var total = size(url)
+    let files = FileManager.default.enumerator(at: url, includingPropertiesForKeys: [key], errorHandler: { _, _ in true })
+    while let file = files?.nextObject() as? URL { total += size(file) }
+    return total
+}
+
+/// Deletes everything inside `folder` but keeps the folder. Skips what macOS won't let Vitals delete.
+func clearContents(of folder: URL) {
+    let fm = FileManager.default
+    for item in (try? fm.contentsOfDirectory(at: folder, includingPropertiesForKeys: nil)) ?? [] {
+        try? fm.removeItem(at: item)
+    }
+}
+
+struct Download: Identifiable {
+    let url: URL
+    let size: Int64
+    var id: URL { url }
+}
+
+/// What landed in Downloads over 30 days ago, biggest first. Throws if macOS hasn't allowed access.
+func oldDownloads() throws -> [Download] {
+    let cutoff = Date.now.addingTimeInterval(-30 * 86_400)
+    let keys: Set<URLResourceKey> = [.addedToDirectoryDateKey, .creationDateKey]
+    return try FileManager.default
+        .contentsOfDirectory(at: Junk.downloads, includingPropertiesForKeys: Array(keys), options: .skipsHiddenFiles)
+        .compactMap { url in
+            let values = try? url.resourceValues(forKeys: keys)
+            guard let added = values?.addedToDirectoryDate ?? values?.creationDate, added < cutoff else { return nil }
+            return Download(url: url, size: allocatedSize(url))
+        }
+        .sorted { $0.size > $1.size }
+}
+
+/// Asks Finder to empty the Bin (Vitals can't see inside it itself). macOS asks once whether that's OK.
+func emptyBin() -> Bool {
+    let script = Process()
+    script.executableURL = URL(fileURLWithPath: "/usr/bin/osascript")
+    script.arguments = ["-e", "with timeout of 600 seconds", "-e", "tell application \"Finder\" to empty trash", "-e", "end timeout"]
+    guard (try? script.run()) != nil else { return false }
+    script.waitUntilExit()
+    return script.terminationStatus == 0
+}
+
+/// Opened from the Disk ring: what's safe to clear and how much each frees, plus old downloads to pick from.
+struct FreeUpSpace: View {
+    let monitor: Monitor
+    let back: () -> Void
+
+    @State private var caches: Int64?           // nil while measuring
+    @State private var xcode: Int64?
+    @State private var downloads: [Download]?
+    @State private var downloadsBlocked = false
+    @State private var picked: Set<URL> = []
+    @State private var working: String?         // the row whose clear-up is running
+    @State private var confirmBin = false
+    @State private var binNote = "Erases what's in it for good"
+    private var hasXcode: Bool { FileManager.default.fileExists(atPath: Junk.xcode.path) }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 16) {
+            HStack {
+                Button(action: back) {
+                    Label("Free up space", systemImage: "chevron.left").font(.system(size: 13, weight: .semibold))
+                }
+                .buttonStyle(.plain)
+                Spacer()
+                Text("\(Format.size(Double(monitor.panel.diskFree) / 1e9)) free")
+                    .font(.system(size: 11)).foregroundStyle(.secondary)
+            }
+
+            VStack(alignment: .leading, spacing: 14) {
+                CleanRow(title: "App caches", symbol: "shippingbox", detail: caches.map(Format.bytes)) {
+                    action("caches", "Clear", work: { clearContents(of: Junk.caches) },
+                           then: { caches = await measure(Junk.caches) })
+                }
+                if hasXcode {
+                    CleanRow(title: "Xcode build files", symbol: "hammer", detail: xcode.map(Format.bytes)) {
+                        action("xcode", "Clear", work: { clearContents(of: Junk.xcode) },
+                               then: { xcode = await measure(Junk.xcode) })
+                    }
+                }
+                CleanRow(title: "Old downloads", symbol: "arrow.down.circle", detail: downloadsDetail) {
+                    action("downloads", "Move to Bin",
+                           work: { [picked] in picked.forEach { try? FileManager.default.trashItem(at: $0, resultingItemURL: nil) } },
+                           then: {
+                               picked = []
+                               binNote = "Empty it to free that space"
+                               await loadDownloads()
+                           })
+                        .disabled(picked.isEmpty)
+                }
+                if let downloads, !downloads.isEmpty { downloadList(downloads) }
+                CleanRow(title: "Bin", symbol: "trash", detail: confirmBin ? "This can't be undone" : binNote) { binButton }
+            }
+            .controlSize(.small)
+        }
+        .task { caches = await measure(Junk.caches) }
+        .task { if hasXcode { xcode = await measure(Junk.xcode) } }
+        .task { await loadDownloads() }
+    }
+
+    private var downloadsDetail: String? {
+        guard let downloads else { return nil }
+        if downloadsBlocked { return "Allow Downloads in System Settings › Privacy & Security › Files & Folders" }
+        if downloads.isEmpty { return "Nothing over 30 days old" }
+        let chosen = downloads.filter { picked.contains($0.url) }
+        return chosen.isEmpty
+            ? "\(downloads.count) over 30 days old. Tick the ones to bin."
+            : "\(chosen.count) chosen · \(Format.bytes(chosen.map(\.size).reduce(0, +)))"
+    }
+
+    private func downloadList(_ items: [Download]) -> some View {
+        let list = VStack(alignment: .leading, spacing: 6) {
+            ForEach(items) { item in
+                Toggle(isOn: Binding(
+                    get: { picked.contains(item.url) },
+                    set: { _ in picked.formSymmetricDifference([item.url]) }   // ticks or unticks it
+                )) {
+                    HStack {
+                        Text(item.url.lastPathComponent).lineLimit(1).truncationMode(.middle)
+                        Spacer(minLength: 8)
+                        Text(Format.bytes(item.size)).foregroundStyle(.secondary).monospacedDigit()
+                    }
+                    .font(.system(size: 11))
+                }
+                .toggleStyle(.checkbox)
+            }
+        }
+        .padding(.leading, 28)
+        return Group {
+            if items.count <= 6 { list } else { ScrollView { list }.frame(height: 150) }
+        }
+    }
+
+    /// Erasing is permanent, so the first click only arms it: the button turns red for a few seconds.
+    @ViewBuilder private var binButton: some View {
+        if working == "bin" {
+            ProgressView().controlSize(.small)
+        } else if confirmBin {
+            Button("Erase") {
+                confirmBin = false
+                Task {
+                    let emptied = await run("bin") { emptyBin() }
+                    binNote = emptied ? "Emptied" : "Allow Vitals to control Finder in System Settings › Privacy & Security › Automation"
+                }
+            }
+            .buttonStyle(.borderedProminent)
+            .tint(.red)
+        } else {
+            Button("Empty") {
+                confirmBin = true
+                Task {
+                    try? await Task.sleep(for: .seconds(4))
+                    confirmBin = false
+                }
+            }
+            .disabled(working != nil)
+        }
+    }
+
+    /// A row's button. Its work runs off the main thread with a spinner in the button's place.
+    private func action(_ id: String, _ title: String, work: @escaping @Sendable () -> Void,
+                        then: @escaping @MainActor () async -> Void) -> some View {
+        Group {
+            if working == id {
+                ProgressView().controlSize(.small)
+            } else {
+                Button(title) {
+                    Task {
+                        await run(id, work)
+                        await then()
+                    }
+                }
+                .disabled(working != nil)
+            }
+        }
+    }
+
+    private func run<T: Sendable>(_ id: String, _ work: @escaping @Sendable () -> T) async -> T {
+        working = id
+        let result = await Task.detached(priority: .userInitiated) { work() }.value
+        working = nil
+        monitor.refreshDisk()
+        return result
+    }
+
+    private func measure(_ folder: URL) async -> Int64 {
+        await Task.detached(priority: .utility) { allocatedSize(folder) }.value
+    }
+
+    private func loadDownloads() async {
+        do {
+            downloads = try await Task.detached(priority: .utility) { try oldDownloads() }.value
+        } catch {
+            downloadsBlocked = true
+            downloads = []
+        }
+    }
+}
+
+/// Icon, name and a line of detail on the left, a button on the right.
+private struct CleanRow<Trailing: View>: View {
+    let title: String
+    let symbol: String
+    let detail: String?   // nil while measuring
+    @ViewBuilder let trailing: Trailing
+
+    var body: some View {
+        HStack(spacing: 10) {
+            Image(systemName: symbol)
+                .font(.system(size: 14))
+                .foregroundStyle(accent)
+                .frame(width: 18)
+            VStack(alignment: .leading, spacing: 1) {
+                Text(title).font(.system(size: 12, weight: .medium))
+                Text(detail ?? "Measuring…")
+                    .font(.system(size: 11)).foregroundStyle(.secondary).monospacedDigit()
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            Spacer(minLength: 8)
+            trailing
+        }
+    }
+}
+
 // MARK: - Docs and self-test
 
 /// `--render-docs <folder>`: once the network graph is full, writes the real panel and menu bar, light and
@@ -780,6 +1112,18 @@ func selfTest() -> Never {
     precondition(used > 0 && used < ProcessInfo.processInfo.physicalMemory, "memory used is plausible")
     precondition(!sysctlString("machdep.cpu.brand_string").isEmpty, "chip name is readable")
     _ = MenuBarLabel.image(cpu: 100, memory: 5, disk: 50, down: "1.2K", up: "999M").size
+
+    let scratch = FileManager.default.temporaryDirectory.appending(path: "vitals-selftest-\(getpid())")
+    try? FileManager.default.createDirectory(at: scratch.appending(path: "inner"), withIntermediateDirectories: true)
+    FileManager.default.createFile(atPath: scratch.appending(path: "inner/file").path,
+                                   contents: Data((0..<20_000).map { UInt8($0 % 251) }))
+    precondition(allocatedSize(scratch) >= 20_000, "folder sizes count what's inside")
+    clearContents(of: scratch)
+    precondition(FileManager.default.fileExists(atPath: scratch.path)
+                 && (try? FileManager.default.contentsOfDirectory(atPath: scratch.path))?.isEmpty == true,
+                 "clearing empties a folder but keeps it")
+    try? FileManager.default.removeItem(at: scratch)
+
     print("\(productName() ?? "Mac"), \(sysctlString("machdep.cpu.brand_string")), \(Format.size(Double(used) / gibibyte)) used, GPU \(gpuUsage())%, network \(networkBytes())")
     print("selftest ok")
     exit(0)
