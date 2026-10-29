@@ -277,6 +277,12 @@ final class Monitor {
     }
 }
 
+/// Height of a rate on the network graph, 0...1 of `peak`. Logarithmic, bending from about 1 KB/s, so a
+/// 50 MB/s download still leaves 500 KB/s of browsing over half way up.
+func graphLevel(_ rate: Double, peak: Double) -> Double {
+    log1p(max(rate, 0) / 1_000) / log1p(peak / 1_000)
+}
+
 /// Counter difference. A counter that went backwards (Wi-Fi reset, 32-bit wrap) counts as 0.
 func counterDelta<T: UnsignedInteger>(_ new: T, _ old: T) -> Double {
     new >= old ? Double(new - old) : 0
@@ -750,14 +756,14 @@ struct NetworkRow: View {
         }
     }
 
-    /// One direction on its own scale, so a quiet upload still shows next to a busy download.
-    /// Upload rises from the middle, download hangs below it.
+    /// One direction on its own log scale, so a quiet upload still shows next to a busy download and a
+    /// big download doesn't flatten everything else. Upload rises from the middle, download hangs below it.
     @ChartContentBuilder
     private func direction(_ name: String, _ history: [Double], _ colour: Color, above: Bool) -> some ChartContent {
-        let peak = max((history.max() ?? 0) * 1.1, 16_000)   // floor: background chatter stays low
+        let peak = max((history.max() ?? 0) * 1.1, 100_000)   // floor: background chatter stays low
         let sign = above ? 1.0 : -1.0
         ForEach(Array(history.enumerated()), id: \.offset) { point in
-            let time = x(point.offset, history), level = sign * point.element / peak
+            let time = x(point.offset, history), level = sign * graphLevel(point.element, peak: peak)
             AreaMark(x: .value("Time", time), yStart: .value("Rate", 0), yEnd: .value("Rate", level),
                      series: .value("Direction", name))
                 .foregroundStyle(LinearGradient(colors: [colour.opacity(0.3), colour.opacity(0.02)],
@@ -1123,6 +1129,8 @@ func selfTest() -> Never {
     precondition(Format.compactRate(12_345_678) == "12M", "megabytes")
     precondition(Format.rate(1_234) == "1.2 KB/s" && Format.rate(820) == "820 B/s", "panel rates match the menu bar")
     precondition(Format.size(343.35) == "343 GB" && Format.size(9.46) == "9.5 GB" && Format.size(1234) == "1.2 TB", "sizes")
+    precondition(graphLevel(0, peak: 1e6) == 0 && graphLevel(1e6, peak: 1e6) == 1, "graph spans its height")
+    precondition(graphLevel(500_000, peak: 50_000_000) > 0.5, "a big download doesn't flatten normal traffic")
     precondition(counterDelta(UInt32(5), 3) == 2 && counterDelta(UInt32(3), 5) == 0, "counters going backwards count as 0")
     precondition(cpuTicks().idle > 0, "CPU counters are readable")
     let used = memoryUsed()
