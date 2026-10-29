@@ -725,45 +725,48 @@ struct Ring: View {
     }
 }
 
-/// Download and upload, with a two-minute graph: amber for download, blue for upload.
+/// Upload and download, with a two-minute graph that follows the arrows: blue upload rises, amber download hangs below.
 struct NetworkRow: View {
     let stats: Stats
 
     var body: some View {
         HStack(spacing: 16) {
             VStack(alignment: .leading, spacing: 5) {
-                rate("arrow.down", stats.netDown, accent)
                 rate("arrow.up", stats.netUp, uploadColour)
+                rate("arrow.down", stats.netDown, accent)
             }
             .frame(width: 92, alignment: .leading)
 
             Chart {
-                ForEach(Array(stats.downHistory.enumerated()), id: \.offset) { point in
-                    AreaMark(x: .value("Time", x(point.offset, stats.downHistory)), y: .value("Rate", point.element),
-                             series: .value("Direction", "Down"))
-                        .foregroundStyle(LinearGradient(colors: [accent.opacity(0.28), accent.opacity(0)],
-                                                        startPoint: .top, endPoint: .bottom))
-                        .interpolationMethod(.catmullRom)
-                    LineMark(x: .value("Time", x(point.offset, stats.downHistory)), y: .value("Rate", point.element),
-                             series: .value("Direction", "Down"))
-                        .foregroundStyle(accent)
-                        .lineStyle(StrokeStyle(lineWidth: 1.75, lineCap: .round, lineJoin: .round))
-                        .interpolationMethod(.catmullRom)
-                }
-                ForEach(Array(stats.upHistory.enumerated()), id: \.offset) { point in
-                    LineMark(x: .value("Time", x(point.offset, stats.upHistory)), y: .value("Rate", point.element),
-                             series: .value("Direction", "Up"))
-                        .foregroundStyle(uploadColour)
-                        .lineStyle(StrokeStyle(lineWidth: 1.5, lineCap: .round, lineJoin: .round))
-                        .interpolationMethod(.catmullRom)
-                }
+                direction("Up", stats.upHistory, uploadColour, above: true)
+                direction("Down", stats.downHistory, accent, above: false)
             }
             .chartXScale(domain: 0...(Monitor.historyLength - 1))
-            .chartYScale(domain: 0...max(((stats.downHistory + stats.upHistory).max() ?? 0) * 1.15, 8_000))
+            .chartYScale(domain: -1...1)
             .chartXAxis(.hidden)
             .chartYAxis(.hidden)
             .chartLegend(.hidden)
-            .frame(height: 36)
+            .frame(height: 44)
+        }
+    }
+
+    /// One direction on its own scale, so a quiet upload still shows next to a busy download.
+    /// Upload rises from the middle, download hangs below it.
+    @ChartContentBuilder
+    private func direction(_ name: String, _ history: [Double], _ colour: Color, above: Bool) -> some ChartContent {
+        let peak = max((history.max() ?? 0) * 1.1, 16_000)   // floor: background chatter stays low
+        let sign = above ? 1.0 : -1.0
+        ForEach(Array(history.enumerated()), id: \.offset) { point in
+            let time = x(point.offset, history), level = sign * point.element / peak
+            AreaMark(x: .value("Time", time), yStart: .value("Rate", 0), yEnd: .value("Rate", level),
+                     series: .value("Direction", name))
+                .foregroundStyle(LinearGradient(colors: [colour.opacity(0.3), colour.opacity(0.02)],
+                                                startPoint: above ? .top : .bottom, endPoint: .center))
+                .interpolationMethod(.catmullRom)
+            LineMark(x: .value("Time", time), y: .value("Rate", level), series: .value("Direction", name))
+                .foregroundStyle(colour)
+                .lineStyle(StrokeStyle(lineWidth: 1.6, lineCap: .round, lineJoin: .round))
+                .interpolationMethod(.catmullRom)
         }
     }
 
